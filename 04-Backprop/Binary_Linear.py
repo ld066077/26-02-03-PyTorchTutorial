@@ -11,7 +11,7 @@ W2 = torch.tensor([2.0], requires_grad=True)  # 权重 W2
 b = torch.tensor([1.0], requires_grad=True)   # 偏置 b
 
 # 前向传播
-y_pred = W1 * x + W2 * x + b  # 预测值
+y_pred = W1 * x ** 2 + W2 * x + b  # 预测值
 loss = (y_pred - y) ** 2  # 损失函数
 
 # 计算损失值
