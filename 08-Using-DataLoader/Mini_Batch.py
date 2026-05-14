@@ -1,9 +1,11 @@
+import numpy as np
 import torch
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 
-class DiabetesDataset(Dataset):
-    def __init__(self):
+class TestDataset(Dataset):
+    def __init__(self, filepath):
+        xy = np.loadtxt(filepath, delimiter=",", dtype=np.float32)
         self.len = xy.shape[0]
         self.x_data = torch.from_numpy(xy[:, :-1])
         self.y_data = torch.from_numpy(xy[:, [-1]])
@@ -14,7 +16,7 @@ class DiabetesDataset(Dataset):
     def __len__(self):
         return self.len
 
-dataset = DiabetesDataset('diabetes.csv.gz')
+dataset = TestDataset('test.csv.gz')
 train_loader = DataLoader(dataset=dataset, batch_size=32, shuffle=True, num_workers=2)
 
 class Model(torch.nn.Module):
@@ -38,7 +40,7 @@ optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
 for epoch in range(100):
     for i, data in enumerate(train_loader, 0):
         # 1. Prepare data
-        inputs, labers = data
+        inputs, labels = data
         # 2. Forward
         y_pred = model(inputs)
         loss = criterion(y_pred, labels)
