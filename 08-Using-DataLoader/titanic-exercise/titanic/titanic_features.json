@@ -1,0 +1,108 @@
+{
+  "feature_columns": [
+    "Age",
+    "SibSp",
+    "Parch",
+    "Fare",
+    "FamilySize",
+    "IsAlone",
+    "TicketGroupSize",
+    "HasCabin",
+    "CabinCount",
+    "FarePerPerson",
+    "Pclass_1",
+    "Pclass_2",
+    "Pclass_3",
+    "Sex_female",
+    "Sex_male",
+    "Embarked_C",
+    "Embarked_Q",
+    "Embarked_S",
+    "Title_Master",
+    "Title_Miss",
+    "Title_Mr",
+    "Title_Mrs",
+    "Title_Officer",
+    "Title_Rare",
+    "Title_Royalty",
+    "TicketPrefix_A",
+    "TicketPrefix_A4",
+    "TicketPrefix_A5",
+    "TicketPrefix_AQ3",
+    "TicketPrefix_AQ4",
+    "TicketPrefix_AS",
+    "TicketPrefix_C",
+    "TicketPrefix_CA",
+    "TicketPrefix_CASOTON",
+    "TicketPrefix_FC",
+    "TicketPrefix_FCC",
+    "TicketPrefix_Fa",
+    "TicketPrefix_LP",
+    "TicketPrefix_NONE",
+    "TicketPrefix_PC",
+    "TicketPrefix_PP",
+    "TicketPrefix_PPP",
+    "TicketPrefix_SC",
+    "TicketPrefix_SCA3",
+    "TicketPrefix_SCA4",
+    "TicketPrefix_SCAH",
+    "TicketPrefix_SCOW",
+    "TicketPrefix_SCPARIS",
+    "TicketPrefix_SCParis",
+    "TicketPrefix_SOC",
+    "TicketPrefix_SOP",
+    "TicketPrefix_SOPP",
+    "TicketPrefix_SOTONO2",
+    "TicketPrefix_SOTONOQ",
+    "TicketPrefix_SP",
+    "TicketPrefix_STONO",
+    "TicketPrefix_STONO2",
+    "TicketPrefix_STONOQ",
+    "TicketPrefix_SWPP",
+    "TicketPrefix_WC",
+    "TicketPrefix_WEP",
+    "Deck_A",
+    "Deck_B",
+    "Deck_C",
+    "Deck_D",
+    "Deck_E",
+    "Deck_F",
+    "Deck_G",
+    "Deck_T",
+    "Deck_U"
+  ],
+  "numeric_features": [
+    "Age",
+    "Fare",
+    "FamilySize",
+    "FarePerPerson",
+    "TicketGroupSize",
+    "CabinCount"
+  ],
+  "scaling": {
+    "Age": {
+      "mean": 29.206700336700333,
+      "std": 13.55602384857502
+    },
+    "Fare": {
+      "mean": 32.204207968574636,
+      "std": 49.6934285971809
+    },
+    "FamilySize": {
+      "mean": 1.904601571268238,
+      "std": 1.6134585413550873
+    },
+    "FarePerPerson": {
+      "mean": 19.916375111917638,
+      "std": 35.84125730003698
+    },
+    "TicketGroupSize": {
+      "mean": 2.121212121212121,
+      "std": 1.7966601633571342
+    },
+    "CabinCount": {
+      "mean": 0.2671156004489338,
+      "std": 0.5471339904223221
+    }
+  }
+}
