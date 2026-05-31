@@ -6,7 +6,6 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
-from torch.utils.data import random_split
 
 
 DATA_DIR = Path(__file__).resolve().parent / "titanic"
@@ -14,6 +13,11 @@ TRAIN_FILE = DATA_DIR / "train.csv"
 TEST_FILE = DATA_DIR / "test.csv"
 MODEL_FILE = DATA_DIR / "titanic_model.pt"
 METADATA_FILE = DATA_DIR / "titanic_features.json"
+
+RANDOM_SEED = 42
+VALID_RATIO = 0.2
+EPOCHS = 120
+BATCH_SIZE = 32
 
 TITLE_GROUPS = {
     "Mr": "Mr",
@@ -38,16 +42,20 @@ TITLE_GROUPS = {
 
 NUMERIC_FEATURES = [
     "Age",
+    "SibSp",
+    "Parch",
     "Fare",
     "FamilySize",
     "FarePerPerson",
     "TicketGroupSize",
     "CabinCount",
 ]
+BINARY_FEATURES = ["IsAlone", "HasCabin"]
+CATEGORICAL_FEATURES = ["Pclass", "Sex", "Embarked", "Title", "TicketPrefix", "Deck"]
 
 
 def extract_title(name):
-    match = re.search(r",\s*([^\.]+)\.", name)
+    match = re.search(r",\s*([^\.]+)\.", str(name))
     if not match:
         return "Rare"
     title = match.group(1).strip()
@@ -68,102 +76,166 @@ def extract_deck(cabin):
     return str(cabin)[0]
 
 
-def build_features(train_df, test_df):
-    train = train_df.copy()
-    test = test_df.copy()
-    train["dataset"] = "train"
-    test["dataset"] = "test"
-    test["Survived"] = -1
-
-    combined = pd.concat([train, test], ignore_index=True, sort=False)
-    combined["Title"] = combined["Name"].apply(extract_title)
-    combined["FamilySize"] = combined["SibSp"] + combined["Parch"] + 1
-    combined["IsAlone"] = (combined["FamilySize"] == 1).astype("int64")
-    combined["TicketPrefix"] = combined["Ticket"].apply(extract_ticket_prefix)
-    combined["TicketGroupSize"] = combined.groupby("Ticket")["Ticket"].transform("count")
-    combined["Deck"] = combined["Cabin"].apply(extract_deck)
-    combined["HasCabin"] = combined["Cabin"].notna().astype("int64")
-    combined["CabinCount"] = combined["Cabin"].fillna("").apply(lambda x: len(str(x).split()) if x else 0)
-
-    embarked_mode = combined["Embarked"].dropna().mode().iloc[0]
-    combined["Embarked"] = combined["Embarked"].fillna(embarked_mode)
-
-    fare_by_pclass = combined.groupby("Pclass")["Fare"].median()
-    combined["Fare"] = combined.apply(
-        lambda row: fare_by_pclass.loc[row["Pclass"]] if pd.isna(row["Fare"]) else row["Fare"],
-        axis=1,
+def split_train_valid(dataframe):
+    train_size = int(len(dataframe) * (1 - VALID_RATIO))
+    generator = torch.Generator().manual_seed(RANDOM_SEED)
+    indices = torch.randperm(len(dataframe), generator=generator).tolist()
+    train_indices = indices[:train_size]
+    valid_indices = indices[train_size:]
+    return (
+        dataframe.iloc[train_indices].reset_index(drop=True),
+        dataframe.iloc[valid_indices].reset_index(drop=True),
     )
 
-    age_by_title_pclass = combined.groupby(["Title", "Pclass"])["Age"].median()
-    global_age_median = combined["Age"].median()
+
+def add_derived_features(dataframe, ticket_group_sizes=None):
+    df = dataframe.copy()
+    df["Title"] = df["Name"].apply(extract_title)
+    df["FamilySize"] = df["SibSp"] + df["Parch"] + 1
+    df["IsAlone"] = (df["FamilySize"] == 1).astype("int64")
+    df["TicketPrefix"] = df["Ticket"].apply(extract_ticket_prefix)
+    df["Deck"] = df["Cabin"].apply(extract_deck)
+    df["HasCabin"] = df["Cabin"].notna().astype("int64")
+    df["CabinCount"] = df["Cabin"].fillna("").apply(lambda x: len(str(x).split()) if x else 0)
+
+    if ticket_group_sizes is None:
+        df["TicketGroupSize"] = df.groupby("Ticket")["Ticket"].transform("count")
+    else:
+        df["TicketGroupSize"] = df["Ticket"].astype(str).map(ticket_group_sizes).fillna(1)
+
+    return df
+
+
+def first_mode_or_default(series, default_value):
+    mode = series.dropna().mode()
+    if mode.empty:
+        return default_value
+    return mode.iloc[0]
+
+
+def fit_preprocessor(dataframe):
+    df = add_derived_features(dataframe)
+
+    embarked_mode = first_mode_or_default(df["Embarked"], "S")
+    fare_median = float(df["Fare"].median())
+    if pd.isna(fare_median):
+        fare_median = 0.0
+
+    fare_by_pclass = {
+        str(pclass): float(fare)
+        for pclass, fare in df.groupby("Pclass")["Fare"].median().dropna().items()
+    }
+
+    age_median = float(df["Age"].median())
+    if pd.isna(age_median):
+        age_median = 30.0
+
+    age_by_title_pclass = {
+        f"{title}|{pclass}": float(age)
+        for (title, pclass), age in df.groupby(["Title", "Pclass"])["Age"].median().dropna().items()
+    }
+
+    ticket_group_sizes = {
+        str(ticket): int(count)
+        for ticket, count in df["Ticket"].astype(str).value_counts().items()
+    }
+
+    df = apply_fill_values(
+        df,
+        {
+            "embarked_mode": embarked_mode,
+            "fare_median": fare_median,
+            "fare_by_pclass": fare_by_pclass,
+            "age_median": age_median,
+            "age_by_title_pclass": age_by_title_pclass,
+        },
+    )
+
+    category_values = {
+        column: sorted(df[column].astype(str).dropna().unique().tolist())
+        for column in CATEGORICAL_FEATURES
+    }
+
+    scaling = {}
+    for column in NUMERIC_FEATURES:
+        mean_value = float(df[column].mean())
+        std_value = float(df[column].std())
+        if pd.isna(std_value) or std_value == 0.0:
+            std_value = 1.0
+        scaling[column] = {"mean": mean_value, "std": std_value}
+
+    feature_columns = [*NUMERIC_FEATURES, *BINARY_FEATURES]
+    for column in CATEGORICAL_FEATURES:
+        feature_columns.extend([f"{column}_{value}" for value in category_values[column]])
+
+    return {
+        "feature_columns": feature_columns,
+        "numeric_features": NUMERIC_FEATURES,
+        "binary_features": BINARY_FEATURES,
+        "categorical_features": CATEGORICAL_FEATURES,
+        "category_values": category_values,
+        "fill_values": {
+            "embarked_mode": embarked_mode,
+            "fare_median": fare_median,
+            "fare_by_pclass": fare_by_pclass,
+            "age_median": age_median,
+            "age_by_title_pclass": age_by_title_pclass,
+        },
+        "scaling": scaling,
+        "ticket_group_sizes": ticket_group_sizes,
+    }
+
+
+def apply_fill_values(dataframe, fill_values):
+    df = dataframe.copy()
+    df["Embarked"] = df["Embarked"].fillna(fill_values["embarked_mode"])
+
+    def fill_fare(row):
+        if not pd.isna(row["Fare"]):
+            return row["Fare"]
+        return fill_values["fare_by_pclass"].get(str(row["Pclass"]), fill_values["fare_median"])
 
     def fill_age(row):
         if not pd.isna(row["Age"]):
             return row["Age"]
-        key = (row["Title"], row["Pclass"])
-        age_value = age_by_title_pclass.get(key, float("nan"))
-        if pd.isna(age_value):
-            return global_age_median
-        return age_value
+        key = f"{row['Title']}|{row['Pclass']}"
+        return fill_values["age_by_title_pclass"].get(key, fill_values["age_median"])
 
-    combined["Age"] = combined.apply(fill_age, axis=1)
-    combined["FarePerPerson"] = combined["Fare"] / combined["FamilySize"]
+    df["Fare"] = df.apply(fill_fare, axis=1)
+    df["Age"] = df.apply(fill_age, axis=1)
+    df["FarePerPerson"] = df["Fare"] / df["FamilySize"]
+    df["Sex"] = df["Sex"].fillna("unknown")
+    return df
 
-    combined["Sex"] = combined["Sex"].map({"male": "male", "female": "female"})
 
-    model_frame = combined[
-        [
-            "dataset",
-            "PassengerId",
-            "Survived",
-            "Pclass",
-            "Sex",
-            "Age",
-            "SibSp",
-            "Parch",
-            "Fare",
-            "Embarked",
-            "Title",
-            "FamilySize",
-            "IsAlone",
-            "TicketPrefix",
-            "TicketGroupSize",
-            "Deck",
-            "HasCabin",
-            "CabinCount",
-            "FarePerPerson",
-        ]
-    ].copy()
+def transform_features(dataframe, metadata):
+    df = add_derived_features(dataframe, metadata["ticket_group_sizes"])
+    df = apply_fill_values(df, metadata["fill_values"])
 
-    categorical_columns = ["Pclass", "Sex", "Embarked", "Title", "TicketPrefix", "Deck"]
-    model_frame[categorical_columns] = model_frame[categorical_columns].astype(str)
-    model_frame = pd.get_dummies(model_frame, columns=categorical_columns, dtype="float32")
+    features = pd.DataFrame(index=df.index)
+    if "PassengerId" in df.columns:
+        features["PassengerId"] = df["PassengerId"]
+    if "Survived" in df.columns:
+        features["Survived"] = df["Survived"]
 
-    feature_columns = [
-        column
-        for column in model_frame.columns
-        if column not in {"dataset", "PassengerId", "Survived"}
-    ]
-
-    train_features = model_frame[model_frame["dataset"] == "train"].copy()
-    test_features = model_frame[model_frame["dataset"] == "test"].copy()
-
-    scaling = {}
     for column in NUMERIC_FEATURES:
-        mean_value = float(train_features[column].mean())
-        std_value = float(train_features[column].std())
-        if std_value == 0.0:
-            std_value = 1.0
-        scaling[column] = {"mean": mean_value, "std": std_value}
-        train_features[column] = (train_features[column] - mean_value) / std_value
-        test_features[column] = (test_features[column] - mean_value) / std_value
+        mean_value = metadata["scaling"][column]["mean"]
+        std_value = metadata["scaling"][column]["std"]
+        features[column] = ((df[column] - mean_value) / std_value).astype("float32")
 
-    metadata = {
-        "feature_columns": feature_columns,
-        "numeric_features": NUMERIC_FEATURES,
-        "scaling": scaling,
-    }
-    return train_features, test_features, metadata
+    for column in BINARY_FEATURES:
+        features[column] = df[column].astype("float32")
+
+    for column in CATEGORICAL_FEATURES:
+        values = df[column].astype(str)
+        for category in metadata["category_values"][column]:
+            features[f"{column}_{category}"] = (values == category).astype("float32")
+
+    return features.reindex(columns=metadata["feature_columns"] + metadata_columns(features), fill_value=0.0)
+
+
+def metadata_columns(dataframe):
+    return [column for column in ["PassengerId", "Survived"] if column in dataframe.columns]
 
 
 class TitanicDataset(Dataset):
@@ -215,29 +287,13 @@ def evaluate(model, data_loader):
     return average_loss, accuracy
 
 
-def main():
-    if not TRAIN_FILE.exists():
-        raise FileNotFoundError(f"Training file not found: {TRAIN_FILE}")
-    if not TEST_FILE.exists():
-        raise FileNotFoundError(f"Test file not found: {TEST_FILE}")
-
-    train_df = pd.read_csv(TRAIN_FILE)
-    test_df = pd.read_csv(TEST_FILE)
-    train_features, _, metadata = build_features(train_df, test_df)
-    feature_columns = metadata["feature_columns"]
-
-    print(f"train rows={len(train_features)}")
-    print(f"feature count={len(feature_columns)}")
-    print(f"sample features={feature_columns[:12]}")
-
-    dataset = TitanicDataset(train_features, feature_columns)
-    train_size = int(len(dataset) * 0.8)
-    valid_size = len(dataset) - train_size
-    generator = torch.Generator().manual_seed(42)
-    train_subset, valid_subset = random_split(dataset, [train_size, valid_size], generator=generator)
-
-    train_loader = DataLoader(dataset=train_subset, batch_size=32, shuffle=True, num_workers=0)
-    valid_loader = DataLoader(dataset=valid_subset, batch_size=64, shuffle=False, num_workers=0)
+def train_model(train_features, feature_columns, valid_features=None, phase_name="train"):
+    train_dataset = TitanicDataset(train_features, feature_columns)
+    train_loader = DataLoader(dataset=train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
+    valid_loader = None
+    if valid_features is not None:
+        valid_dataset = TitanicDataset(valid_features, feature_columns)
+        valid_loader = DataLoader(dataset=valid_dataset, batch_size=64, shuffle=False, num_workers=0)
 
     model = Model(len(feature_columns))
     criterion = torch.nn.BCEWithLogitsLoss(reduction="mean")
@@ -246,12 +302,11 @@ def main():
     best_valid_accuracy = 0.0
     best_state_dict = None
 
-    for epoch in range(120):
+    for epoch in range(EPOCHS):
         model.train()
         total_loss = 0.0
 
-        for batch_index, data in enumerate(train_loader, 0):
-            inputs, labels = data
+        for inputs, labels in train_loader:
             logits = model(inputs)
             loss = criterion(logits, labels)
 
@@ -260,31 +315,78 @@ def main():
             optimizer.step()
 
             total_loss += loss.item()
-            if batch_index % 5 == 0:
-                print(f"epoch={epoch:03d} batch={batch_index:03d} loss={loss.item():.6f}")
 
         train_loss = total_loss / len(train_loader)
+        if valid_loader is None:
+            if epoch == 0 or (epoch + 1) % 20 == 0 or epoch + 1 == EPOCHS:
+                print(f"{phase_name} epoch={epoch:03d} train_loss={train_loss:.6f}")
+            continue
+
         valid_loss, valid_accuracy = evaluate(model, valid_loader)
-        print(
-            f"epoch={epoch:03d} train_loss={train_loss:.6f} "
-            f"valid_loss={valid_loss:.6f} valid_acc={valid_accuracy:.4f}"
-        )
+        if epoch == 0 or (epoch + 1) % 10 == 0 or epoch + 1 == EPOCHS:
+            print(
+                f"{phase_name} epoch={epoch:03d} train_loss={train_loss:.6f} "
+                f"valid_loss={valid_loss:.6f} valid_acc={valid_accuracy:.4f}"
+            )
 
         if valid_accuracy > best_valid_accuracy:
             best_valid_accuracy = valid_accuracy
             best_state_dict = {key: value.detach().clone() for key, value in model.state_dict().items()}
 
-    if best_state_dict is None:
-        best_state_dict = model.state_dict()
+    if best_state_dict is not None:
+        model.load_state_dict(best_state_dict)
+
+    return model, best_valid_accuracy
+
+
+def main():
+    if not TRAIN_FILE.exists():
+        raise FileNotFoundError(f"Training file not found: {TRAIN_FILE}")
+
+    raw_train_df = pd.read_csv(TRAIN_FILE)
+    train_raw_df, valid_raw_df = split_train_valid(raw_train_df)
+
+    validation_metadata = fit_preprocessor(train_raw_df)
+    validation_feature_columns = validation_metadata["feature_columns"]
+    train_features = transform_features(train_raw_df, validation_metadata)
+    valid_features = transform_features(valid_raw_df, validation_metadata)
+
+    print(f"train rows={len(train_features)} valid rows={len(valid_features)}")
+    print(f"validation feature count={len(validation_feature_columns)}")
+    _, best_valid_accuracy = train_model(
+        train_features,
+        validation_feature_columns,
+        valid_features=valid_features,
+        phase_name="validation",
+    )
+
+    final_metadata = fit_preprocessor(raw_train_df)
+    final_feature_columns = final_metadata["feature_columns"]
+    final_train_features = transform_features(raw_train_df, final_metadata)
+    final_model, _ = train_model(
+        final_train_features,
+        final_feature_columns,
+        valid_features=None,
+        phase_name="final",
+    )
+
+    final_metadata["validation"] = {
+        "seed": RANDOM_SEED,
+        "valid_ratio": VALID_RATIO,
+        "best_valid_accuracy": best_valid_accuracy,
+        "train_rows": len(train_raw_df),
+        "valid_rows": len(valid_raw_df),
+    }
 
     torch.save(
         {
-            "model_state_dict": best_state_dict,
-            "feature_columns": feature_columns,
+            "model_state_dict": final_model.state_dict(),
+            "feature_columns": final_feature_columns,
         },
         MODEL_FILE,
     )
-    METADATA_FILE.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    METADATA_FILE.write_text(json.dumps(final_metadata, indent=2), encoding="utf-8")
+    print(f"final feature count={len(final_feature_columns)}")
     print(f"Saved model to {MODEL_FILE}")
     print(f"Saved metadata to {METADATA_FILE}")
     print(f"best_valid_accuracy={best_valid_accuracy:.4f}")
