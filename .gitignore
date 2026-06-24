@@ -3,3 +3,4 @@ venv/
 .codex
 08-Using-DataLoader/titanic-exercise/.cache/
 08-Using-DataLoader/titanic-exercise/__pycache__/
+.progress.md
